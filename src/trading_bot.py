@@ -1,0 +1,498 @@
+import os
+import time
+import logging
+import pandas as pd
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
+import schedule
+from dotenv import load_dotenv
+
+from bitso_api import BitsoAPI
+from strategies import MovingAverageStrategy, RSIStrategy, CombinedStrategy
+from portfolio import Portfolio
+
+load_dotenv()
+
+# Set up logging
+logging.basicConfig(
+    level=getattr(logging, os.getenv('LOG_LEVEL', 'INFO')),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('logs/trading_bot.log'),
+        logging.StreamHandler()
+    ]
+)
+
+logger = logging.getLogger(__name__)
+
+class TradingBot:
+    """
+    Main trading bot class that orchestrates all components
+    """
+    
+    def __init__(self):
+        self.api = BitsoAPI()  # Will use staging environment based on .env configuration
+        self.portfolio = Portfolio()
+        
+        # Configuration from environment
+        # Support both single pair and multi-pair modes
+        single_pair = os.getenv('TRADING_PAIR')
+        multi_pairs = os.getenv('TRADING_PAIRS')
+        
+        if multi_pairs:
+            self.trading_pairs = [pair.strip() for pair in multi_pairs.split(',')]
+            logger.info(f"Multi-pair mode: {self.trading_pairs}")
+        elif single_pair:
+            self.trading_pairs = [single_pair]
+            logger.info(f"Single-pair mode: {single_pair}")
+        else:
+            self.trading_pairs = ['eth_mxn']
+            logger.info("Default mode: eth_mxn")
+        
+        self.trade_amount = float(os.getenv('TRADE_AMOUNT', '100.0'))
+        self.stop_loss_pct = float(os.getenv('STOP_LOSS_PERCENTAGE', '5.0'))
+        self.take_profit_pct = float(os.getenv('TAKE_PROFIT_PERCENTAGE', '10.0'))
+        self.dry_run = os.getenv('DRY_RUN', 'True').lower() == 'true'
+        
+        # Select strategy from environment variable
+        strategy_name = os.getenv('STRATEGY', 'combined').lower()
+        if strategy_name == 'ma':
+            self.strategy = MovingAverageStrategy()
+            logger.info('Using Moving Average Strategy')
+        elif strategy_name == 'rsi':
+            self.strategy = RSIStrategy()
+            logger.info('Using RSI Strategy')
+        else:
+            self.strategy = CombinedStrategy()
+            logger.info('Using Combined Strategy')
+        
+        # Data storage - separate history for each trading pair
+        self.price_histories = {}
+        for pair in self.trading_pairs:
+            self.price_histories[pair] = pd.DataFrame(columns=['timestamp', 'price'])
+        
+        self.max_history_length = 1000
+        
+        # Load existing price data from logs if available
+        self._load_historical_data()
+        
+        logger.info(f"Trading Bot initialized for pairs: {self.trading_pairs}")
+        logger.info(f"Dry run mode: {self.dry_run}")
+        
+        total_points = sum(len(self.price_histories[pair]) for pair in self.trading_pairs)
+        logger.info(f"Loaded {total_points} total historical price points across all pairs")
+    
+    def _load_historical_data(self):
+        """Load historical price data from CSV files first, then fall back to log files"""
+        
+        for pair in self.trading_pairs:
+            # First, try to load from the most recent CSV file for this pair
+            if self._load_from_most_recent_csv(pair):
+                continue
+            
+            # If no CSV files found, try to load from logs
+            logger.info(f"No CSV files found for {pair}, attempting to load from log file...")
+            self._load_historical_data_from_logs(pair)
+    
+    def _load_from_most_recent_csv(self, trading_pair: str) -> bool:
+        """Load data from the most recent CSV file in the data directory for a specific pair"""
+        import glob
+        
+        data_dir = 'data'
+        if not os.path.exists(data_dir):
+            logger.info(f"No data directory found for {trading_pair}")
+            return False
+        
+        # Look for CSV files with our naming patterns for this specific pair ONLY
+        csv_patterns = [
+            f'data/price_history_{trading_pair}_*.csv',
+            f'data/historical_prices_{trading_pair}_*.csv'
+        ]
+        
+        csv_files = []
+        for pattern in csv_patterns:
+            csv_files.extend(glob.glob(pattern))
+        
+        # Also check legacy files but verify they contain the correct trading pair data
+        legacy_patterns = [
+            'data/price_history_*.csv',
+            'data/historical_prices_*.csv'
+        ]
+        
+        for pattern in legacy_patterns:
+            legacy_files = glob.glob(pattern)
+            for file in legacy_files:
+                # Skip if it's already a pair-specific file
+                if trading_pair in os.path.basename(file):
+                    continue
+                    
+                # Check if this legacy file contains data for our trading pair
+                if self._file_contains_pair_data(file, trading_pair):
+                    csv_files.append(file)
+        
+        if not csv_files:
+            logger.info(f"No CSV files found for {trading_pair}")
+            return False
+        
+        # Sort by modification time (most recent first)
+        csv_files.sort(key=os.path.getmtime, reverse=True)
+        most_recent_file = csv_files[0]
+        
+        logger.info(f"Found {len(csv_files)} CSV files for {trading_pair}, loading from: {most_recent_file}")
+        
+        # Load the most recent file
+        if self.load_price_history_from_file(most_recent_file, trading_pair):
+            logger.info(f"Successfully loaded {len(self.price_histories[trading_pair])} price points for {trading_pair}")
+            return True
+        else:
+            logger.warning(f"Failed to load from {most_recent_file} for {trading_pair}")
+            return False
+    
+    def _file_contains_pair_data(self, filename: str, trading_pair: str) -> bool:
+        """Check if a CSV file contains data that was logged for a specific trading pair"""
+        try:
+            # Quick check by looking at log entries that might reference this file
+            # For now, we'll be conservative and only use pair-specific files
+            # This prevents loading wrong data for the wrong currency
+            return False
+        except Exception:
+            return False
+    
+    def _load_historical_data_from_logs(self, trading_pair: str):
+        """Load historical price data from log files for a specific trading pair"""
+        import re
+        from datetime import datetime
+        
+        log_file = 'logs/trading_bot.log'
+        
+        if not os.path.exists(log_file):
+            logger.info(f"No existing log file found for {trading_pair}, starting with empty price history")
+            return
+        
+        try:
+            price_data = []
+            
+            # Regular expression to match price log entries for this specific pair
+            price_pattern = r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+ - trading_bot - INFO - Current ' + \
+                          re.escape(trading_pair) + r' price: ([\d.]+)'
+            
+            with open(log_file, 'r') as f:
+                for line in f:
+                    match = re.search(price_pattern, line)
+                    if match:
+                        timestamp_str = match.group(1)
+                        price = float(match.group(2))
+                        
+                        try:
+                            timestamp = pd.to_datetime(timestamp_str, format='%Y-%m-%d %H:%M:%S')
+                            price_data.append({
+                                'timestamp': timestamp,
+                                'price': price
+                            })
+                        except ValueError as e:
+                            logger.debug(f"Could not parse timestamp {timestamp_str}: {e}")
+                            continue
+            
+            if price_data:
+                # Create DataFrame from extracted data
+                historical_df = pd.DataFrame(price_data)
+                
+                # Remove duplicates and sort by timestamp
+                historical_df = historical_df.drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+                
+                # Keep only recent data (within max_history_length)
+                if len(historical_df) > self.max_history_length:
+                    historical_df = historical_df.tail(self.max_history_length)
+                
+                self.price_histories[trading_pair] = historical_df.reset_index(drop=True)
+                logger.info(f"Loaded {len(self.price_histories[trading_pair])} price points for {trading_pair} from log file")
+            else:
+                logger.info(f"No price data found in log file for {trading_pair}")
+                
+        except Exception as e:
+            logger.warning(f"Could not load historical data from logs for {trading_pair}: {e}")
+            logger.info(f"Starting with empty price history for {trading_pair}")
+    
+    def save_price_history_to_file(self, filename: str = None):
+        """Save current price history to CSV files for backup"""
+        try:
+            os.makedirs('data', exist_ok=True)
+            
+            for pair in self.trading_pairs:
+                if self.price_histories[pair].empty:
+                    continue
+                    
+                if filename is None:
+                    pair_filename = f"data/price_history_{pair}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                else:
+                    # Add pair to filename
+                    base, ext = os.path.splitext(filename)
+                    pair_filename = f"{base}_{pair}{ext}"
+                
+                self.price_histories[pair].to_csv(pair_filename, index=False)
+                logger.info(f"Price history for {pair} saved to {pair_filename}")
+            
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save price history: {e}")
+            return False
+    
+    def load_price_history_from_file(self, filename: str, trading_pair: str):
+        """Load price history from a CSV file for a specific trading pair"""
+        try:
+            if not os.path.exists(filename):
+                logger.warning(f"File {filename} does not exist")
+                return False
+            
+            df = pd.read_csv(filename)
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            
+            # Validate data structure
+            if 'timestamp' not in df.columns or 'price' not in df.columns:
+                logger.error("CSV file must contain 'timestamp' and 'price' columns")
+                return False
+            
+            # Additional validation: check if this looks like reasonable price data
+            if len(df) == 0:
+                logger.warning(f"CSV file {filename} is empty")
+                return False
+                
+            # Basic sanity check on price data
+            prices = df['price']
+            if prices.min() <= 0:
+                logger.warning(f"CSV file {filename} contains invalid price data (negative or zero prices)")
+                return False
+            
+            # Sort by timestamp and remove duplicates
+            df = df.drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+            
+            # Keep only recent data
+            if len(df) > self.max_history_length:
+                df = df.tail(self.max_history_length)
+            
+            self.price_histories[trading_pair] = df.reset_index(drop=True)
+            logger.info(f"Loaded {len(self.price_histories[trading_pair])} price points for {trading_pair} from {filename}")
+            
+            # Log some basic stats about the loaded data
+            price_range = f"{prices.min():.2f} - {prices.max():.2f}"
+            logger.info(f"Price range for {trading_pair}: {price_range} MXN")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to load price history from {filename} for {trading_pair}: {e}")
+            return False
+    
+    def fetch_market_data(self, trading_pair: str) -> Optional[float]:
+        """Fetch current market data for a specific trading pair"""
+        try:
+            ticker = self.api.get_ticker(trading_pair)
+            if ticker.get('success'):
+                price = float(ticker['payload']['last'])
+                timestamp = datetime.now()
+                
+                # Add to price history for this pair
+                new_row = pd.DataFrame({
+                    'timestamp': [timestamp],
+                    'price': [price]
+                })
+                
+                if self.price_histories[trading_pair].empty:
+                    self.price_histories[trading_pair] = new_row
+                else:
+                    self.price_histories[trading_pair] = pd.concat([self.price_histories[trading_pair], new_row], ignore_index=True)
+                
+                # Keep only recent history
+                if len(self.price_histories[trading_pair]) > self.max_history_length:
+                    self.price_histories[trading_pair] = self.price_histories[trading_pair].tail(self.max_history_length)
+                
+                logger.info(f"Current {trading_pair} price: {price}")
+                return price
+            else:
+                logger.error(f"Failed to fetch ticker for {trading_pair}: {ticker}")
+                return None
+        except Exception as e:
+            logger.error(f"Error fetching market data for {trading_pair}: {e}")
+            return None
+    
+    def check_account_status(self) -> bool:
+        """Check if account is ready for trading"""
+        try:
+            status = self.api.get_account_status()
+            if status.get('success'):
+                account_status = status['payload']['status']
+                logger.info(f"Account status: {account_status}")
+                return account_status == 'active'
+            else:
+                logger.error(f"Failed to get account status: {status}")
+                return False
+        except Exception as e:
+            logger.error(f"Error checking account status: {e}")
+            return False
+    
+    def execute_buy_order(self, price: float, trading_pair: str) -> bool:
+        """Execute a buy order for a specific trading pair"""
+        try:
+            asset = trading_pair.split('_')[0].upper()
+            
+            if self.dry_run:
+                logger.info(f"DRY RUN: Would buy {self.trade_amount} MXN worth of {asset} at {price}")
+                self.portfolio.add_position(asset, self.trade_amount / price, price)
+                return True
+            
+            # Use minor (MXN amount) for buy orders
+            response = self.api.place_order(
+                book=trading_pair,
+                side='buy',
+                order_type='market',
+                minor=self.trade_amount  # Use MXN amount directly
+            )
+            
+            if response.get('success'):
+                logger.info(f"Buy order placed successfully for {trading_pair}: {response}")
+                # Calculate asset amount from response or estimate
+                asset_amount = self.trade_amount / price
+                self.portfolio.add_position(asset, asset_amount, price)
+                return True
+            else:
+                logger.error(f"Failed to place buy order for {trading_pair}: {response}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error executing buy order for {trading_pair}: {e}")
+            return False
+    
+    def execute_sell_order(self, amount: float, price: float, trading_pair: str) -> bool:
+        """Execute a sell order for a specific trading pair"""
+        try:
+            asset = trading_pair.split('_')[0].upper()
+            
+            if self.dry_run:
+                logger.info(f"DRY RUN: Would sell {amount} {asset} at {price}")
+                self.portfolio.close_position(asset, amount, price)
+                return True
+            
+            # Use major (crypto amount) for sell orders
+            response = self.api.place_order(
+                book=trading_pair,
+                side='sell',
+                order_type='market',
+                major=amount  # Use crypto amount directly
+            )
+            
+            if response.get('success'):
+                logger.info(f"Sell order placed successfully for {trading_pair}: {response}")
+                self.portfolio.close_position(asset, amount, price)
+                return True
+            else:
+                logger.error(f"Failed to place sell order for {trading_pair}: {response}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error executing sell order for {trading_pair}: {e}")
+            return False
+    
+    def check_stop_loss_take_profit(self, current_price: float, trading_pair: str):
+        """Check if any positions should be closed due to stop loss or take profit"""
+        asset = trading_pair.split('_')[0].upper()
+        
+        for position in self.portfolio.positions:
+            if position['asset'] == asset:
+                entry_price = position['entry_price']
+                amount = position['amount']
+                
+                # Calculate percentage change
+                pct_change = ((current_price - entry_price) / entry_price) * 100
+                
+                # Check stop loss
+                if pct_change <= -self.stop_loss_pct:
+                    logger.warning(f"Stop loss triggered for {trading_pair}! Price change: {pct_change:.2f}%")
+                    self.execute_sell_order(amount, current_price, trading_pair)
+                
+                # Check take profit
+                elif pct_change >= self.take_profit_pct:
+                    logger.info(f"Take profit triggered for {trading_pair}! Price change: {pct_change:.2f}%")
+                    self.execute_sell_order(amount, current_price, trading_pair)
+    
+    def run_trading_cycle(self):
+        """Run one trading cycle for all trading pairs"""
+        logger.info("Starting trading cycle...")
+        
+        # Check account status first
+        if not self.check_account_status():
+            logger.warning("Account not ready for trading")
+            return
+        
+        # Process each trading pair
+        for trading_pair in self.trading_pairs:
+            logger.info(f"Processing {trading_pair}...")
+            
+            # Fetch current market data for this pair
+            current_price = self.fetch_market_data(trading_pair)
+            if not current_price:
+                logger.warning(f"Failed to fetch data for {trading_pair}")
+                continue
+            
+            # Check stop loss and take profit for this pair
+            self.check_stop_loss_take_profit(current_price, trading_pair)
+            
+            # Only proceed with new trades if we have enough data
+            if len(self.price_histories[trading_pair]) < 50:
+                logger.info(f"Not enough data for {trading_pair}. Current: {len(self.price_histories[trading_pair])}, Need: 50")
+                continue
+            
+            # Check trading signals for this pair
+            try:
+                should_buy = self.strategy.should_buy(self.price_histories[trading_pair])
+                should_sell = self.strategy.should_sell(self.price_histories[trading_pair])
+                
+                # Get asset name from trading pair (e.g., eth_mxn -> ETH)
+                asset = trading_pair.split('_')[0].upper()
+                current_asset_amount = self.portfolio.get_asset_amount(asset)
+                
+                if should_buy and current_asset_amount == 0:
+                    logger.info(f"Buy signal detected for {trading_pair}!")
+                    self.execute_buy_order(current_price, trading_pair)
+                
+                elif should_sell and current_asset_amount > 0:
+                    logger.info(f"Sell signal detected for {trading_pair}!")
+                    self.execute_sell_order(current_asset_amount, current_price, trading_pair)
+                
+                else:
+                    logger.info(f"No trading signals detected for {trading_pair}")
+            
+            except Exception as e:
+                logger.error(f"Error in trading cycle for {trading_pair}: {e}")
+        
+        # Log portfolio status
+        self.portfolio.log_status()
+        
+        # Periodically save price history (every 10 cycles)
+        total_points = sum(len(self.price_histories[pair]) for pair in self.trading_pairs)
+        if total_points % 10 == 0 and total_points > 0:
+            self.save_price_history_to_file()
+    
+    def start(self):
+        """Start the trading bot"""
+        logger.info("Starting Bitso Ethereum Trading Bot...")
+        
+        # Create logs directory
+        os.makedirs('logs', exist_ok=True)
+        
+        # Run initial check
+        self.run_trading_cycle()
+        
+        # Schedule regular trading cycles
+        check_interval = int(os.getenv('CHECK_INTERVAL_MINUTES', '5'))
+        schedule.every(check_interval).minutes.do(self.run_trading_cycle)
+        
+        logger.info(f"Bot scheduled to run every {check_interval} minutes")
+        
+        # Keep the bot running
+        while True:
+            schedule.run_pending()
+            time.sleep(60)  # Check every minute
+
+if __name__ == "__main__":
+    bot = TradingBot()
+    bot.start()
