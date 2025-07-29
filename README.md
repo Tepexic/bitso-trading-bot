@@ -77,8 +77,10 @@ DRY_RUN=True  # Set to False for live trading
 
 **Environment Settings:**
 
-- `BITSO_USE_STAGING=True`: Use Bitso's staging environment for testing
-- `BITSO_USE_STAGING=False`: Use Bitso's production environment for live trading
+- `BITSO_USE_STAGING=True`: Use Bitso's staging environment (`https://stage.bitso.com/api/v3`) for testing
+- `BITSO_USE_STAGING=False`: Use Bitso's production environment (`https://bitso.com/api/v3`) for live trading
+
+**Important Note**: Bitso's production API uses `https://bitso.com/api/v3`, not the more common `https://api.bitso.com/v3` pattern used by other exchanges.
 
 ## Getting Bitso API Credentials
 

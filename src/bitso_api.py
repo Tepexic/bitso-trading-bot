@@ -31,7 +31,8 @@ class BitsoAPI:
             if debug:
                 logger.debug("Using Bitso STAGING environment")
         else:
-            self.base_url = 'https://api.bitso.com/v3'
+            # self.base_url = 'https://api.bitso.com/v3'
+            self.base_url = 'https://bitso.com/api/v3'
             if debug:
                 logger.debug("Using Bitso PRODUCTION environment")
             
