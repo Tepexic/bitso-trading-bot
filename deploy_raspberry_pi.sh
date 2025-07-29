@@ -38,7 +38,7 @@ if [ ! -f ".env" ]; then
 fi
 
 # Check if API credentials are configured
-if grep -q "aSas\|ASAsaSas" .env; then
+if grep -q "your_api_key_here\|your_api_secret_here" .env; then
     echo "⚠️  WARNING: .env file contains default API credentials!"
     echo "Please edit .env with your real Bitso API credentials before continuing."
     read -p "Continue anyway? (y/N): " -n 1 -r

@@ -38,7 +38,31 @@ pip install --upgrade pip
 
 # Install requirements
 echo "📥 Installing Python packages..."
-pip install -r requirements.txt
+
+# Check if we're on Raspberry Pi and install system packages first
+if grep -q "Raspberry Pi" /proc/cpuinfo 2>/dev/null || grep -q "BCM" /proc/cpuinfo 2>/dev/null; then
+    echo "🥧 Raspberry Pi detected - installing system dependencies..."
+    
+    # Install required system packages for pandas/numpy on Pi
+    sudo apt update
+    sudo apt install -y python3-dev python3-numpy python3-pandas python3-matplotlib python3-scipy libatlas-base-dev
+    
+    # Use Pi-specific requirements with pre-built wheels
+    echo "📦 Installing Pi-optimized packages..."
+    if pip install --only-binary=all -r requirements-pi.txt --extra-index-url https://www.piwheels.org/simple; then
+        echo "✅ Pi-optimized packages installed successfully"
+    else
+        echo "⚠️  Falling back to system packages and essential pip packages..."
+        # Install only essential packages that usually work on Pi
+        pip install requests python-dotenv schedule --extra-index-url https://www.piwheels.org/simple
+    fi
+    
+    # Install remaining packages that might not be in Pi requirements
+    pip install --only-binary=all requests python-dotenv schedule --extra-index-url https://www.piwheels.org/simple
+else
+    # Regular installation for other systems
+    pip install -r requirements.txt
+fi
 
 if [ $? -eq 0 ]; then
     echo "✅ All packages installed successfully"

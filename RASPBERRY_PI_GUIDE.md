@@ -32,10 +32,16 @@ cd ~
 git clone https://github.com/Tepexic/bitso-trading-bot.git
 cd bitso-trading-bot
 
-# Run the setup script
-chmod +x setup.sh
-./setup.sh
+# Use the Pi-specific setup script (recommended for Raspberry Pi)
+chmod +x setup_pi.sh
+./setup_pi.sh
+
+# Alternative: Use the general setup script
+# chmod +x setup.sh
+# ./setup.sh
 ```
+
+**Note:** The `setup_pi.sh` script is optimized for Raspberry Pi and installs system packages to avoid compilation issues with NumPy/Pandas.
 
 ### 3. Configure Your API Credentials
 
