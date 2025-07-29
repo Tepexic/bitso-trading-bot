@@ -1,0 +1,22 @@
+[Unit]
+Description=Bitso Crypto Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/bitso-trading-bot
+Environment=PATH=/home/pi/bitso-trading-bot/.venv/bin
+ExecStart=/home/pi/bitso-trading-bot/.venv/bin/python src/trading_bot.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Environment variables (optional - can also use .env file)
+# Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
