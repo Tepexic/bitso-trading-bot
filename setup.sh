@@ -61,13 +61,30 @@ else
     echo "✅ Environment file already exists"
 fi
 
+# Test if the installation works
+echo "🧪 Testing installation..."
+.venv/bin/python -c "import requests, pandas, schedule; print('✅ All required packages installed successfully')" || {
+    echo "❌ Package installation test failed"
+    exit 1
+}
+
 echo ""
 echo "🎉 Setup completed successfully!"
 echo ""
 echo "Next steps:"
 echo "1. Edit .env file with your Bitso API credentials"
-echo "2. Test the API connection: python test_api.py"
-echo "3. Run the trading bot: python src/trading_bot.py"
+echo "2. Test the API connection: .venv/bin/python test_api.py"
+echo "3. Run the trading bot: .venv/bin/python src/trading_bot.py"
+echo ""
+echo "📊 Available trading strategies:"
+echo "   - MA (Moving Average): Set STRATEGY=ma"
+echo "   - RSI (Relative Strength Index): Set STRATEGY=rsi"  
+echo "   - Combined (MA + RSI): Set STRATEGY=combined"
+echo ""
+echo "🛡️ Safety recommendations:"
+echo "   - Start with DRY_RUN=True for testing"
+echo "   - Use BITSO_USE_STAGING=True for initial testing"
+echo "   - Begin with small TRADE_AMOUNT values"
 echo ""
 echo "For more information, check the README.md file"
 echo "=================================================="
