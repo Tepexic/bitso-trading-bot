@@ -399,35 +399,137 @@ class TradingBot:
             logger.error(f"Error executing buy order for {trading_pair}: {e}")
             return False
     
+    def get_actual_asset_balance(self, asset: str) -> float:
+        """Get the actual available balance for a specific asset from the exchange"""
+        try:
+            balances = self.get_available_balance()
+            return balances.get(asset.upper(), 0.0)
+        except Exception as e:
+            logger.error(f"Error getting actual balance for {asset}: {e}")
+            return 0.0
+    
+    def validate_sell_amount(self, trading_pair: str, requested_amount: float) -> float:
+        """
+        Validate and adjust sell amount based on actual available balance
+        Returns the validated amount that can actually be sold
+        """
+        asset = trading_pair.split('_')[0].upper()
+        
+        # Get actual balance from exchange
+        actual_balance = self.get_actual_asset_balance(asset)
+        portfolio_balance = self.portfolio.get_asset_amount(asset)
+        
+        logger.info(f"Sell validation for {asset}:")
+        logger.info(f"  Requested amount: {requested_amount}")
+        logger.info(f"  Portfolio tracking: {portfolio_balance}")
+        logger.info(f"  Actual exchange balance: {actual_balance}")
+        
+        # Use the minimum of requested amount and actual balance
+        available_to_sell = min(requested_amount, actual_balance)
+        
+        # Check if we have a minimum trade amount (Bitso usually has minimums)
+        min_trade_amount = self.get_minimum_trade_amount(trading_pair)
+        
+        if available_to_sell < min_trade_amount:
+            logger.warning(f"Available amount {available_to_sell} {asset} is below minimum trade amount {min_trade_amount}")
+            return 0.0  # Can't trade
+        
+        if available_to_sell != requested_amount:
+            logger.warning(f"Adjusting sell amount from {requested_amount} to {available_to_sell} {asset}")
+        
+        return available_to_sell
+    
+    def get_minimum_trade_amount(self, trading_pair: str) -> float:
+        """Get minimum trade amount for a trading pair"""
+        # These are typical Bitso minimums - you might want to fetch this from API
+        minimums = {
+            'eth_mxn': 0.001,   # 0.001 ETH
+            'ltc_mxn': 0.01,    # 0.01 LTC  
+            'avax_mxn': 0.1,    # 0.1 AVAX
+            'sol_mxn': 0.01,    # 0.01 SOL
+        }
+        return minimums.get(trading_pair, 0.001)  # Default to 0.001
+    
     def execute_sell_order(self, amount: float, price: float, trading_pair: str) -> bool:
-        """Execute a sell order for a specific trading pair"""
+        """Execute a sell order for a specific trading pair with balance validation"""
         try:
             asset = trading_pair.split('_')[0].upper()
             
+            # Validate the sell amount against actual balance
+            validated_amount = self.validate_sell_amount(trading_pair, amount)
+            
+            if validated_amount <= 0:
+                logger.warning(f"Cannot sell {asset}: insufficient balance or below minimum trade amount")
+                return False
+            
             if self.dry_run:
-                logger.info(f"DRY RUN: Would sell {amount} {asset} at {price}")
-                self.portfolio.close_position(asset, amount, price)
+                logger.info(f"DRY RUN: Would sell {validated_amount} {asset} at {price}")
+                self.portfolio.close_position(asset, validated_amount, price)
                 return True
             
-            # Use major (crypto amount) for sell orders
+            # Use the validated amount for the actual order
             response = self.api.place_order(
                 book=trading_pair,
                 side='sell',
                 order_type='market',
-                major=amount  # Use crypto amount directly
+                major=validated_amount  # Use validated crypto amount
             )
             
             if response.get('success'):
                 logger.info(f"Sell order placed successfully for {trading_pair}: {response}")
-                self.portfolio.close_position(asset, amount, price)
+                # Update portfolio with the actual amount sold
+                self.portfolio.close_position(asset, validated_amount, price)
                 return True
             else:
-                logger.error(f"Failed to place sell order for {trading_pair}: {response}")
+                error_msg = response.get('error', {}).get('message', 'Unknown error')
+                logger.error(f"Failed to place sell order for {trading_pair}: {error_msg}")
+                
+                # Handle specific Bitso error cases
+                if 'insufficient' in error_msg.lower() or 'balance' in error_msg.lower():
+                    logger.error(f"Insufficient balance error - this should have been caught by validation!")
+                    # Sync portfolio with actual balances
+                    self.sync_portfolio_with_exchange()
+                
                 return False
                 
         except Exception as e:
             logger.error(f"Error executing sell order for {trading_pair}: {e}")
             return False
+    
+    def sync_portfolio_with_exchange(self):
+        """Sync portfolio tracking with actual exchange balances"""
+        try:
+            logger.info("Syncing portfolio with exchange balances...")
+            
+            # Get actual balances from exchange
+            exchange_balances = self.get_available_balance()
+            
+            # Clear portfolio positions that don't match reality
+            for pair in self.trading_pairs:
+                asset = pair.split('_')[0].upper()
+                portfolio_amount = self.portfolio.get_asset_amount(asset)
+                exchange_amount = exchange_balances.get(asset, 0.0)
+                
+                if abs(portfolio_amount - exchange_amount) > 0.001:  # Allow small rounding differences
+                    logger.warning(f"Portfolio mismatch for {asset}:")
+                    logger.warning(f"  Portfolio: {portfolio_amount}")
+                    logger.warning(f"  Exchange: {exchange_amount}")
+                    
+                    # Clear the position in portfolio tracking
+                    self.portfolio.clear_asset_positions(asset)
+                    
+                    # If exchange has balance, add it to portfolio
+                    if exchange_amount > 0:
+                        # Estimate average price from recent data
+                        if len(self.price_histories[pair]) > 0:
+                            avg_price = self.price_histories[pair]['price'].tail(10).mean()
+                            self.portfolio.add_position(asset, exchange_amount, avg_price)
+                            logger.info(f"Restored {asset} position: {exchange_amount} at estimated price {avg_price}")
+            
+            logger.info("Portfolio sync completed")
+            
+        except Exception as e:
+            logger.error(f"Error syncing portfolio with exchange: {e}")
     
     def check_stop_loss_take_profit(self, current_price: float, trading_pair: str):
         """Check if any positions should be closed due to stop loss or take profit"""

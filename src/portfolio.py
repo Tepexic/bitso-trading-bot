@@ -86,6 +86,15 @@ class Portfolio:
         total = sum(pos['amount'] for pos in self.positions if pos['asset'] == asset)
         return total
     
+    def clear_asset_positions(self, asset: str):
+        """Clear all positions for a specific asset (used for sync corrections)"""
+        original_count = len(self.positions)
+        self.positions = [pos for pos in self.positions if pos['asset'] != asset]
+        removed_count = original_count - len(self.positions)
+        
+        if removed_count > 0:
+            logger.warning(f"Cleared {removed_count} positions for {asset} due to balance mismatch")
+    
     def update_unrealized_pnl(self, asset: str, current_price: float):
         """Update unrealized P&L for all positions of an asset"""
         for position in self.positions:
