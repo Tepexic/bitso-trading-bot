@@ -89,25 +89,108 @@ DRY_RUN=True  # Set to False for live trading
 
 **Important**: Never share your API credentials or commit them to version control.
 
-## Trading Strategies
+## Trading Strategies 📊
 
-### Moving Average Strategy
+The bot implements three sophisticated trading strategies that you can switch between using the `STRATEGY` environment variable:
 
-- **Buy Signal**: Short-term MA crosses above long-term MA
-- **Sell Signal**: Short-term MA crosses below long-term MA
-- **Default Settings**: 10-period and 30-period moving averages
+### 1. Moving Average (MA) Strategy 📈
 
-### RSI Strategy
+**What it does:**
 
-- **Buy Signal**: RSI < 30 (oversold condition)
-- **Sell Signal**: RSI > 70 (overbought condition)
-- **Default Settings**: 14-period RSI
+- Uses two moving averages: a short-term (10 periods) and long-term (30 periods)
+- A moving average smooths out price data by creating a constantly updated average price over a specific time period
 
-### Combined Strategy
+**Signals:**
 
-- **Buy Signal**: Both MA and RSI strategies agree
-- **Sell Signal**: Either strategy suggests selling
-- **More Conservative**: Reduces false signals
+- **Buy Signal**: When the short MA (10-period) crosses **above** the long MA (30-period)
+  - Indicates upward momentum - recent prices are higher than the longer-term average
+  - Example: If ETH's 10-day average becomes higher than its 30-day average, it suggests a bullish trend
+- **Sell Signal**: When the short MA crosses **below** the long MA
+  - Indicates downward momentum - recent prices are falling below the longer-term trend
+
+**Best for:** Trending markets, trend following
+**Pros:** Simple and reliable, reduces noise from short-term fluctuations
+**Cons:** Lag indicator (signals come after trend has started), false signals in choppy markets
+
+### 2. RSI Strategy 🎯
+
+**What it does:**
+
+- RSI (Relative Strength Index) measures the speed and magnitude of price changes
+- Ranges from 0 to 100, indicating if an asset is oversold or overbought
+- Formula: `RSI = 100 - (100 / (1 + RS))` where `RS = Average Gain / Average Loss`
+
+**Signals:**
+
+- **Buy Signal**: When RSI < 30 (oversold condition)
+  - Suggests the asset has been sold too aggressively and may bounce back
+  - Example: If ETH's RSI drops to 25, it might be a good buying opportunity
+- **Sell Signal**: When RSI > 70 (overbought condition)
+  - Suggests the asset has been bought too aggressively and may correct downward
+
+**Best for:** Range-bound markets, identifying reversal points
+**Pros:** More responsive than moving averages, great for spotting extremes
+**Cons:** Can stay overbought/oversold for extended periods in strong trends
+
+### 3. Combined Strategy 🎯📈
+
+**What happens when combined:**
+
+**Buy Signal (Conservative Approach):**
+
+- **BOTH** MA and RSI must agree (`ma_buy AND rsi_buy`)
+- MA says "trend is up" AND RSI says "oversold, ready to bounce"
+- Creates more conservative, higher-confidence buy signals
+- Example: Short MA crosses above long MA AND RSI is below 30
+
+**Sell Signal (Protective Approach):**
+
+- **EITHER** MA or RSI suggests selling (`ma_sell OR rsi_sell`)
+- If MA says "trend is down" OR RSI says "overbought", then sell
+- Creates a more protective exit strategy
+
+**Why this combination works:**
+
+1. **Trend + Momentum**: MA identifies trend direction, RSI identifies momentum extremes
+2. **Reduced False Signals**: Requiring both indicators to agree for buying reduces whipsaws
+3. **Quick Exits**: Allowing either indicator to trigger a sell helps preserve profits
+
+**Best for:** All market conditions, risk-averse traders
+**Pros:** Higher quality signals, better risk management
+**Cons:** Fewer trading opportunities, may miss some profitable trades
+
+### Strategy Comparison
+
+| Strategy     | Best For          | Signal Frequency      | Risk Level | Best Markets   |
+| ------------ | ----------------- | --------------------- | ---------- | -------------- |
+| **MA**       | Trend following   | Fewer, later          | Medium     | Trending       |
+| **RSI**      | Mean reversion    | More frequent         | Higher     | Range-bound    |
+| **Combined** | Balanced approach | Fewer, higher quality | Lower      | All conditions |
+
+### Configuration
+
+Choose your strategy in `.env`:
+
+```bash
+STRATEGY=ma          # Moving Average only
+STRATEGY=rsi         # RSI only
+STRATEGY=combined    # Both strategies combined (default)
+```
+
+### Tunable Parameters
+
+Customize strategy behavior with these environment variables:
+
+```bash
+# Moving Average Settings
+MA_SHORT_PERIOD=10      # Short moving average window
+MA_LONG_PERIOD=30       # Long moving average window
+
+# RSI Settings
+RSI_PERIOD=14           # RSI calculation period
+RSI_OVERSOLD=30         # RSI buy threshold
+RSI_OVERBOUGHT=70       # RSI sell threshold
+```
 
 ## Risk Management
 

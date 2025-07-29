@@ -330,6 +330,43 @@ class TradingBot:
             logger.error(f"Error checking account status: {e}")
             return False
     
+    def get_available_balance(self) -> Dict[str, float]:
+        """Get available balance for trading"""
+        try:
+            balance_response = self.api.get_balance()
+            if balance_response.get('success'):
+                balances = {}
+                for balance in balance_response['payload']['balances']:
+                    currency = balance['currency'].upper()
+                    available = float(balance['available'])
+                    balances[currency] = available
+                
+                logger.debug(f"Available balances: {balances}")
+                return balances
+            else:
+                logger.error(f"Failed to get balance: {balance_response}")
+                return {}
+        except Exception as e:
+            logger.error(f"Error getting balance: {e}")
+            return {}
+    
+    def has_sufficient_funds(self, trading_pair: str, trade_amount: float) -> bool:
+        """Check if we have sufficient funds for a trade"""
+        try:
+            # For buying, we need MXN funds
+            balances = self.get_available_balance()
+            available_mxn = balances.get('MXN', 0.0)
+            
+            if available_mxn >= trade_amount:
+                return True
+            else:
+                logger.warning(f"Insufficient funds for {trading_pair}: need {trade_amount} MXN, have {available_mxn} MXN")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error checking funds for {trading_pair}: {e}")
+            return False
+    
     def execute_buy_order(self, price: float, trading_pair: str) -> bool:
         """Execute a buy order for a specific trading pair"""
         try:
@@ -423,6 +460,14 @@ class TradingBot:
             logger.warning("Account not ready for trading")
             return
         
+        # Get available balance once for the entire cycle
+        balances = self.get_available_balance()
+        available_mxn = balances.get('MXN', 0.0)
+        logger.info(f"Available MXN balance: {available_mxn:.2f}")
+        
+        # Collect all buy signals first, then prioritize if needed
+        buy_signals = []
+        
         # Process each trading pair
         for trading_pair in self.trading_pairs:
             logger.info(f"Processing {trading_pair}...")
@@ -452,7 +497,11 @@ class TradingBot:
                 
                 if should_buy and current_asset_amount == 0:
                     logger.info(f"Buy signal detected for {trading_pair}!")
-                    self.execute_buy_order(current_price, trading_pair)
+                    buy_signals.append({
+                        'pair': trading_pair,
+                        'price': current_price,
+                        'asset': asset
+                    })
                 
                 elif should_sell and current_asset_amount > 0:
                     logger.info(f"Sell signal detected for {trading_pair}!")
@@ -464,6 +513,10 @@ class TradingBot:
             except Exception as e:
                 logger.error(f"Error in trading cycle for {trading_pair}: {e}")
         
+        # Handle buy signals with fund management
+        if buy_signals:
+            self._process_buy_signals(buy_signals, available_mxn)
+        
         # Log portfolio status
         self.portfolio.log_status()
         
@@ -471,6 +524,60 @@ class TradingBot:
         total_points = sum(len(self.price_histories[pair]) for pair in self.trading_pairs)
         if total_points % 10 == 0 and total_points > 0:
             self.save_price_history_to_file()
+    
+    def _process_buy_signals(self, buy_signals: List[Dict], available_mxn: float):
+        """Process buy signals with intelligent fund allocation"""
+        logger.info(f"Processing {len(buy_signals)} buy signals with {available_mxn:.2f} MXN available")
+        
+        # Calculate how many trades we can afford
+        affordable_trades = int(available_mxn // self.trade_amount)
+        
+        if affordable_trades == 0:
+            logger.warning("No funds available for any buy orders")
+            for signal in buy_signals:
+                logger.warning(f"Buy signal for {signal['pair']} ignored due to insufficient funds")
+            return
+        
+        if len(buy_signals) <= affordable_trades:
+            # We can afford all trades
+            logger.info(f"Can afford all {len(buy_signals)} trades")
+            for signal in buy_signals:
+                self.execute_buy_order(signal['price'], signal['pair'])
+        else:
+            # Need to prioritize - use configured allocation strategy
+            logger.warning(f"Can only afford {affordable_trades} out of {len(buy_signals)} trades")
+            
+            allocation_strategy = os.getenv('FUND_ALLOCATION_STRATEGY', 'first_come_first_served')
+            selected_signals = self._select_trades_by_strategy(buy_signals, affordable_trades, allocation_strategy)
+            
+            logger.info(f"Selected trades using {allocation_strategy}: {[s['pair'] for s in selected_signals]}")
+            for signal in selected_signals:
+                self.execute_buy_order(signal['price'], signal['pair'])
+            
+            # Log the ignored signals
+            ignored_signals = [s for s in buy_signals if s not in selected_signals]
+            for signal in ignored_signals:
+                logger.warning(f"Buy signal for {signal['pair']} ignored due to fund allocation limits")
+    
+    def _select_trades_by_strategy(self, buy_signals: List[Dict], max_trades: int, strategy: str) -> List[Dict]:
+        """Select which trades to execute based on allocation strategy"""
+        import random
+        
+        if strategy == 'first_come_first_served':
+            return buy_signals[:max_trades]
+        
+        elif strategy == 'random':
+            return random.sample(buy_signals, min(max_trades, len(buy_signals)))
+        
+        elif strategy == 'equal_split':
+            # For equal split, we might adjust trade amounts instead of selecting trades
+            # For now, just return first N trades but log the strategy
+            logger.info("Equal split strategy selected - consider implementing variable trade amounts")
+            return buy_signals[:max_trades]
+        
+        else:
+            logger.warning(f"Unknown allocation strategy '{strategy}', using first_come_first_served")
+            return buy_signals[:max_trades]
     
     def start(self):
         """Start the trading bot"""
