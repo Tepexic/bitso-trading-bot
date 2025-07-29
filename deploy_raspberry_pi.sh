@@ -20,13 +20,21 @@ fi
 
 # Get the current directory (should be the project root)
 PROJECT_DIR=$(pwd)
+CURRENT_USER=$(whoami)
+CURRENT_GROUP=$(id -gn)
 SERVICE_FILE="pi-trader.service"
 
 echo "📍 Project directory: $PROJECT_DIR"
+echo "👤 Current user: $CURRENT_USER"
+echo "👥 Current group: $CURRENT_GROUP"
 
-# Update the service file with the correct path
-echo "🔧 Updating service file paths..."
-sed -i "s|/home/pi/bitso-trading-bot|$PROJECT_DIR|g" $SERVICE_FILE
+# Update the service file with the correct path and user
+echo "🔧 Updating service file paths and user..."
+cp $SERVICE_FILE "${SERVICE_FILE}.backup"
+sed -e "s|REPLACE_PROJECT_DIR|$PROJECT_DIR|g" \
+    -e "s|REPLACE_USER|$CURRENT_USER|g" \
+    -e "s|REPLACE_GROUP|$CURRENT_GROUP|g" \
+    "${SERVICE_FILE}.backup" > $SERVICE_FILE
 
 # Check if .env file exists
 if [ ! -f ".env" ]; then
@@ -72,6 +80,12 @@ fi
 # Install the systemd service
 echo "📋 Installing systemd service..."
 sudo cp $SERVICE_FILE /etc/systemd/system/
+
+# Stop any existing service first
+if sudo systemctl is-active --quiet pi-trader.service; then
+    echo "🛑 Stopping existing service..."
+    sudo systemctl stop pi-trader.service
+fi
 
 # Reload systemd and enable the service
 echo "🔄 Enabling service for auto-start..."

@@ -5,11 +5,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
-Group=pi
-WorkingDirectory=/home/pi/bitso-trading-bot
-Environment=PATH=/home/pi/bitso-trading-bot/.venv/bin
-ExecStart=/home/pi/bitso-trading-bot/.venv/bin/python src/trading_bot.py
+User=REPLACE_USER
+Group=REPLACE_GROUP
+WorkingDirectory=REPLACE_PROJECT_DIR
+Environment=PATH=REPLACE_PROJECT_DIR/.venv/bin
+ExecStart=REPLACE_PROJECT_DIR/.venv/bin/python src/trading_bot.py
 Restart=always
 RestartSec=10
 StandardOutput=journal
