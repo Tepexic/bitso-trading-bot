@@ -81,6 +81,9 @@ class TradingBot:
         
         total_points = sum(len(self.price_histories[pair]) for pair in self.trading_pairs)
         logger.info(f"Loaded {total_points} total historical price points across all pairs")
+
+    # Historical data may be old; we'll gate trading on freshness of the most recent point
+    # instead of pruning aggressively (prevents infinite pruning when accumulation interval > 1h window)
     
     def _load_historical_data(self):
         """Load historical price data from CSV files first, then fall back to log files"""
@@ -93,6 +96,23 @@ class TradingBot:
             # If no CSV files found, try to load from logs
             logger.info(f"No CSV files found for {pair}, attempting to load from log file...")
             self._load_historical_data_from_logs(pair)
+
+    def _is_latest_point_fresh(self, trading_pair: str) -> bool:
+        """Check whether the most recent data point for a pair is within the last hour.
+        Requirement: Data older than 1 hour must not be used for trading decisions.
+        We keep older history (needed to build indicators) but block trading until a fresh point arrives.
+        """
+        df = self.price_histories.get(trading_pair)
+        if df is None or df.empty:
+            return False
+        try:
+            latest_ts = df['timestamp'].iloc[-1]
+            if isinstance(latest_ts, str):  # safeguard
+                latest_ts = pd.to_datetime(latest_ts)
+            return (datetime.now() - latest_ts) <= timedelta(hours=1)
+        except Exception as e:
+            logger.error(f"Error checking freshness for {trading_pair}: {e}")
+            return False
     
     def _load_from_most_recent_csv(self, trading_pair: str) -> bool:
         """Load data from the most recent CSV file in the data directory for a specific pair"""
@@ -573,19 +593,25 @@ class TradingBot:
         # Process each trading pair
         for trading_pair in self.trading_pairs:
             logger.info(f"Processing {trading_pair}...")
-            
-            # Fetch current market data for this pair
+
+            # Fetch current market data for this pair (adds a fresh point)
             current_price = self.fetch_market_data(trading_pair)
             if not current_price:
                 logger.warning(f"Failed to fetch data for {trading_pair}")
                 continue
             
+            # After fetching, history should now be fresh; if still not (e.g., fetch failed earlier), skip
+            if not self._is_latest_point_fresh(trading_pair):
+                logger.info(f"Latest data point for {trading_pair} older than 1 hour; waiting for fresh data before trading.")
+                continue
+
             # Check stop loss and take profit for this pair
             self.check_stop_loss_take_profit(current_price, trading_pair)
             
             # Only proceed with new trades if we have enough data
             if len(self.price_histories[trading_pair]) < 50:
-                logger.info(f"Not enough data for {trading_pair}. Current: {len(self.price_histories[trading_pair])}, Need: 50")
+                # Clarify if due to stale pruning
+                logger.info(f"Not enough data for {trading_pair}. Current points: {len(self.price_histories[trading_pair])}, Need: 50")
                 continue
             
             # Check trading signals for this pair
