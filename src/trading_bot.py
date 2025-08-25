@@ -14,6 +14,8 @@ from portfolio import Portfolio
 load_dotenv()
 
 # Set up logging
+# Ensure logs directory exists before adding FileHandler
+os.makedirs('logs', exist_ok=True)
 logging.basicConfig(
     level=getattr(logging, os.getenv('LOG_LEVEL', 'INFO')),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -53,6 +55,14 @@ class TradingBot:
         self.stop_loss_pct = float(os.getenv('STOP_LOSS_PERCENTAGE', '5.0'))
         self.take_profit_pct = float(os.getenv('TAKE_PROFIT_PERCENTAGE', '10.0'))
         self.dry_run = os.getenv('DRY_RUN', 'True').lower() == 'true'
+        # Fees (as decimals)
+        self.fee_maker = float(os.getenv('FEE_MAKER', '0.005'))
+        self.fee_taker = float(os.getenv('FEE_TAKER', '0.0065'))
+        # Default order preference
+        self.default_order_type = os.getenv('DEFAULT_ORDER_TYPE', 'market').lower()
+        if self.default_order_type not in ('market', 'limit'):
+            logger.warning(f"Unsupported DEFAULT_ORDER_TYPE '{self.default_order_type}', falling back to market")
+            self.default_order_type = 'market'
         
         # Select strategy from environment variable
         strategy_name = os.getenv('STRATEGY', 'combined').lower()
@@ -78,6 +88,7 @@ class TradingBot:
         
         logger.info(f"Trading Bot initialized for pairs: {self.trading_pairs}")
         logger.info(f"Dry run mode: {self.dry_run}")
+        logger.info(f"Fees maker={self.fee_maker*100:.3f}%, taker={self.fee_taker*100:.3f}% (order type default={self.default_order_type})")
         
         total_points = sum(len(self.price_histories[pair]) for pair in self.trading_pairs)
         logger.info(f"Loaded {total_points} total historical price points across all pairs")
@@ -391,10 +402,13 @@ class TradingBot:
         """Execute a buy order for a specific trading pair"""
         try:
             asset = trading_pair.split('_')[0].upper()
+            taker = True  # currently only market orders implemented
+            fee_rate = self.fee_taker if taker else self.fee_maker
             
             if self.dry_run:
-                logger.info(f"DRY RUN: Would buy {self.trade_amount} MXN worth of {asset} at {price}")
-                self.portfolio.add_position(asset, self.trade_amount / price, price)
+                effective_entry_price = price * (1 + fee_rate)
+                logger.info(f"DRY RUN: Would buy {self.trade_amount} MXN {asset} @ {price:.2f} (entry w/ fee {effective_entry_price:.2f}, fee {fee_rate*100:.2f}%)")
+                self.portfolio.add_position(asset, self.trade_amount / price, effective_entry_price, fee_rate)
                 return True
             
             # Use minor (MXN amount) for buy orders
@@ -409,7 +423,8 @@ class TradingBot:
                 logger.info(f"Buy order placed successfully for {trading_pair}: {response}")
                 # Calculate asset amount from response or estimate
                 asset_amount = self.trade_amount / price
-                self.portfolio.add_position(asset, asset_amount, price)
+                effective_entry_price = price * (1 + fee_rate)
+                self.portfolio.add_position(asset, asset_amount, effective_entry_price, fee_rate)
                 return True
             else:
                 logger.error(f"Failed to place buy order for {trading_pair}: {response}")
@@ -482,9 +497,11 @@ class TradingBot:
                 logger.warning(f"Cannot sell {asset}: insufficient balance or below minimum trade amount")
                 return False
             
+            taker = True
+            fee_rate = self.fee_taker if taker else self.fee_maker
             if self.dry_run:
-                logger.info(f"DRY RUN: Would sell {validated_amount} {asset} at {price}")
-                self.portfolio.close_position(asset, validated_amount, price)
+                logger.info(f"DRY RUN: Would sell {validated_amount} {asset} @ {price:.2f} (fee {fee_rate*100:.2f}%)")
+                self.portfolio.close_position(asset, validated_amount, price, fee_rate)
                 return True
             
             # Use the validated amount for the actual order
@@ -497,8 +514,7 @@ class TradingBot:
             
             if response.get('success'):
                 logger.info(f"Sell order placed successfully for {trading_pair}: {response}")
-                # Update portfolio with the actual amount sold
-                self.portfolio.close_position(asset, validated_amount, price)
+                self.portfolio.close_position(asset, validated_amount, price, fee_rate)
                 return True
             else:
                 error_msg = response.get('error', {}).get('message', 'Unknown error')
@@ -557,11 +573,12 @@ class TradingBot:
         
         for position in self.portfolio.positions:
             if position['asset'] == asset:
-                entry_price = position['entry_price']
+                entry_price = position['entry_price']  # already includes fees at entry
                 amount = position['amount']
-                
-                # Calculate percentage change
-                pct_change = ((current_price - entry_price) / entry_price) * 100
+                # Use taker fee assumption for exit (conservative). Could refine later.
+                exit_fee_rate = self.fee_taker
+                net_exit_price = current_price * (1 - exit_fee_rate)
+                pct_change = ((net_exit_price - entry_price) / entry_price) * 100
                 
                 # Check stop loss
                 if pct_change <= -self.stop_loss_pct:
